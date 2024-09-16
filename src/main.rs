@@ -47,6 +47,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                 label: None,
                 required_features: wgpu::Features::empty(),
                 required_limits: Limits::default(),
+                memory_hints: Default::default(),
             },
             None,
         )
@@ -122,6 +123,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
             alpha_to_coverage_enabled: false,
         },
         multiview: None,
+        cache: None,
     });
 
     let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -136,6 +138,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         module: &compute_shader,
         entry_point: "dissolve",
         compilation_options: Default::default(),
+        cache: None,
     });
 
     let uniforms = Uniforms {
