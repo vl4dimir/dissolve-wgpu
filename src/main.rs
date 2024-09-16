@@ -179,7 +179,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         sample_count: 4,
         dimension: TextureDimension::D2,
         format: TextureFormat::Rgba16Float,
-        usage: TextureUsages::RENDER_ATTACHMENT,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST,
         label: None,
         view_formats: &[],
     });
@@ -244,7 +244,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             sample_count: 4,
                             dimension: TextureDimension::D2,
                             format: TextureFormat::Rgba16Float,
-                            usage: TextureUsages::RENDER_ATTACHMENT,
+                            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST,
                             label: None,
                             view_formats: &[],
                         });
@@ -286,7 +286,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                         let current_texture = surface
                             .get_current_texture()
                             .expect("Failed to acquire current surface texture");
-                        let mut encoder =
+                        let mut command_encoder =
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: None,
                             });
@@ -294,30 +294,33 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                         // Run compute – "dissolve" the texture by setting random pixels to black
                         {
                             let mut compute_pass =
-                                encoder.begin_compute_pass(&ComputePassDescriptor {
+                                command_encoder.begin_compute_pass(&ComputePassDescriptor {
                                     label: None,
                                     timestamp_writes: None,
                                 });
                             compute_pass.set_pipeline(&compute_pipeline);
                             compute_pass.set_bind_group(0, &uniform_bind_group, &[]);
                             compute_pass.set_bind_group(1, &texture_bind_group, &[]);
-
-                            let work_group_sizes = [
+                            compute_pass.dispatch_workgroups(
                                 (config.width as f32 / 8f32).ceil() as u32,
                                 (config.height as f32 / 8f32).ceil() as u32,
                                 1,
-                            ];
-                            compute_pass.dispatch_workgroups(
-                                work_group_sizes[0],
-                                work_group_sizes[1],
-                                work_group_sizes[2],
                             );
                         }
+
+                        // Since the target texture has been modified by the compute shader, we must
+                        // copy the modifications "back" into the multisampled texture, so that the
+                        // upcoming render pass will observe them.
+                        command_encoder.copy_texture_to_texture(
+                            texture.as_image_copy(),
+                            multisampled_texture.as_image_copy(),
+                            texture.size(),
+                        );
 
                         // Render the rotating triangle
                         {
                             let mut render_pass =
-                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                command_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                     label: None,
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                         view: &multisampled_texture_view,
@@ -336,13 +339,13 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             render_pass.draw(0..3, 0..1);
                         }
 
-                        encoder.copy_texture_to_texture(
+                        command_encoder.copy_texture_to_texture(
                             texture.as_image_copy(),
                             current_texture.texture.as_image_copy(),
                             texture.size(),
                         );
 
-                        queue.submit(Some(encoder.finish()));
+                        queue.submit(Some(command_encoder.finish()));
                         current_texture.present();
 
                         last_render_instant = now;
