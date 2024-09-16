@@ -4,8 +4,9 @@ use std::time::Instant;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingResource, BindingType, BufferBinding, BufferBindingType, BufferUsages, Extent3d,
-    MultisampleState, ShaderStages, TextureDescriptor, TextureDimension, TextureFormat,
+    BindingResource, BindingType, BufferBinding, BufferBindingType, BufferUsages,
+    ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, Limits, MultisampleState,
+    ShaderStages, StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages, TextureViewDescriptor,
 };
 use winit::dpi::LogicalSize;
@@ -45,8 +46,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
             &wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
+                required_limits: Limits::default(),
             },
             None,
         )
@@ -55,13 +55,18 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("render.wgsl"))),
     });
 
-    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+    let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("dissolve.wgsl"))),
+    });
+
+    let uniform_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         entries: &[BindGroupLayoutEntry {
             binding: 0,
-            visibility: ShaderStages::VERTEX,
+            visibility: ShaderStages::VERTEX | ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
                 ty: BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -72,14 +77,27 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         label: None,
     });
 
+    let texture_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        entries: &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::StorageTexture {
+                access: StorageTextureAccess::WriteOnly,
+                format: TextureFormat::Rgba16Float,
+                view_dimension: Default::default(),
+            },
+            count: None,
+        }],
+        label: None,
+    });
+
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[&bind_group_layout],
+        bind_group_layouts: &[&uniform_bind_group_layout],
         push_constant_ranges: &[],
     });
 
-    let swapchain_capabilities = surface.get_capabilities(&adapter);
-    let swapchain_format = swapchain_capabilities.formats[0];
+    let surface_format = TextureFormat::Rgba16Float;
 
     let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: None,
@@ -94,7 +112,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
             module: &shader,
             entry_point: "fs_main",
             compilation_options: Default::default(),
-            targets: &[Some(swapchain_format.into())],
+            targets: &[Some(surface_format.into())],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
@@ -104,6 +122,20 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
             alpha_to_coverage_enabled: false,
         },
         multiview: None,
+    });
+
+    let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&uniform_bind_group_layout, &texture_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&compute_pipeline_layout),
+        module: &compute_shader,
+        entry_point: "dissolve",
+        compilation_options: Default::default(),
     });
 
     let uniforms = Uniforms {
@@ -116,9 +148,9 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
     });
 
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+    let uniform_bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: None,
-        layout: &bind_group_layout,
+        layout: &uniform_bind_group_layout,
         entries: &[BindGroupEntry {
             binding: 0,
             resource: BindingResource::Buffer(BufferBinding {
@@ -133,6 +165,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         .get_default_config(&adapter, size.width, size.height)
         .unwrap();
     config.usage = TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST;
+    config.format = surface_format;
     surface.configure(&device, &config);
 
     let size = Extent3d {
@@ -145,7 +178,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         mip_level_count: 1,
         sample_count: 4,
         dimension: TextureDimension::D2,
-        format: TextureFormat::Bgra8UnormSrgb,
+        format: TextureFormat::Rgba16Float,
         usage: TextureUsages::RENDER_ATTACHMENT,
         label: None,
         view_formats: &[],
@@ -158,12 +191,23 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
-        format: TextureFormat::Bgra8UnormSrgb,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::COPY_SRC
+            | TextureUsages::STORAGE_BINDING,
         label: None,
         view_formats: &[],
     });
     let mut texture_view = texture.create_view(&TextureViewDescriptor::default());
+
+    let mut texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: None,
+        layout: &texture_bind_group_layout,
+        entries: &[BindGroupEntry {
+            binding: 0,
+            resource: BindingResource::TextureView(&texture_view),
+        }],
+    });
 
     let start_instant = Instant::now();
     let mut last_render_instant = Instant::now();
@@ -199,7 +243,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             mip_level_count: 1,
                             sample_count: 4,
                             dimension: TextureDimension::D2,
-                            format: TextureFormat::Bgra8UnormSrgb,
+                            format: TextureFormat::Rgba16Float,
                             usage: TextureUsages::RENDER_ATTACHMENT,
                             label: None,
                             view_formats: &[],
@@ -212,12 +256,23 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             mip_level_count: 1,
                             sample_count: 1,
                             dimension: TextureDimension::D2,
-                            format: TextureFormat::Bgra8UnormSrgb,
-                            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                            format: TextureFormat::Rgba16Float,
+                            usage: TextureUsages::RENDER_ATTACHMENT
+                                | TextureUsages::COPY_SRC
+                                | TextureUsages::STORAGE_BINDING,
                             label: None,
                             view_formats: &[],
                         });
                         texture_view = texture.create_view(&TextureViewDescriptor::default());
+
+                        texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                            label: None,
+                            layout: &texture_bind_group_layout,
+                            entries: &[BindGroupEntry {
+                                binding: 0,
+                                resource: BindingResource::TextureView(&texture_view),
+                            }],
+                        });
 
                         window.request_redraw();
                     }
@@ -235,15 +290,40 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: None,
                             });
+
+                        // Run compute – "dissolve" the texture by setting random pixels to black
                         {
-                            let mut rpass =
+                            let mut compute_pass =
+                                encoder.begin_compute_pass(&ComputePassDescriptor {
+                                    label: None,
+                                    timestamp_writes: None,
+                                });
+                            compute_pass.set_pipeline(&compute_pipeline);
+                            compute_pass.set_bind_group(0, &uniform_bind_group, &[]);
+                            compute_pass.set_bind_group(1, &texture_bind_group, &[]);
+
+                            let work_group_sizes = [
+                                (config.width as f32 / 8f32).ceil() as u32,
+                                (config.height as f32 / 8f32).ceil() as u32,
+                                1,
+                            ];
+                            compute_pass.dispatch_workgroups(
+                                work_group_sizes[0],
+                                work_group_sizes[1],
+                                work_group_sizes[2],
+                            );
+                        }
+
+                        // Render the rotating triangle
+                        {
+                            let mut render_pass =
                                 encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                     label: None,
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                         view: &multisampled_texture_view,
                                         resolve_target: Some(&texture_view),
                                         ops: wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
+                                            load: wgpu::LoadOp::Load, // Crucial for this technique
                                             store: wgpu::StoreOp::Store,
                                         },
                                     })],
@@ -251,9 +331,9 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                                     timestamp_writes: None,
                                     occlusion_query_set: None,
                                 });
-                            rpass.set_bind_group(0, &bind_group, &[]);
-                            rpass.set_pipeline(&render_pipeline);
-                            rpass.draw(0..3, 0..1);
+                            render_pass.set_bind_group(0, &uniform_bind_group, &[]);
+                            render_pass.set_pipeline(&render_pipeline);
+                            render_pass.draw(0..3, 0..1);
                         }
 
                         encoder.copy_texture_to_texture(
